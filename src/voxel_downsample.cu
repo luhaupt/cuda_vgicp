@@ -29,10 +29,10 @@ struct ComputeKeyAndValue {
     ComputeKeyAndValue(float leaf) : inv_leaf(1.f / leaf), offset(1 << 20) {}
 
     __host__ __device__
-    thrust::tuple<uint64_t, float4> operator()(const float3& point) const {
-        float x = thrust::get<0>(point);
-        float y = thrust::get<1>(point);
-        float z = thrust::get<2>(point);
+    thrust::tuple<uint64_t, float4> operator()(const pcl::PointXYZ& point) const {
+        float x = point.x;
+        float y = point.y;
+        float z = point.z;
 
         int vx = static_cast<int>(floorf(x * inv_leaf)) + offset;
         int vy = static_cast<int>(floorf(y * inv_leaf)) + offset;
@@ -69,14 +69,7 @@ struct SumFloat4 {
 
 std::vector<float3> voxelgrid_downsample(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size) {
     size_t N = cloud->points.size();
-    if (N == 0) return {};
-
-    thrust::host_vector<float3> h_points(N);
-    for (size_t i = 0; i < N; ++i) {
-        h_points[i] = make_float3(cloud->points[i].x, cloud->points[i].y, cloud->points[i].z);
-    }
-
-    thrust::device_vector<float3> d_points = h_points;
+    thrust::device_vector<pcl::PointXYZ> d_points = cloud->points;;
     thrust::device_vector<uint64_t> keys(N);
     thrust::device_vector<float4> vals(N);
 
@@ -101,7 +94,7 @@ std::vector<float3> voxelgrid_downsample(const pcl::PointCloud<pcl::PointXYZ>::P
     );
 
     size_t M = reduce_end.first - unique_keys.begin();
-    thrust::device_vector<float3> centroids(valid_n);
+    thrust::device_vector<float3> centroids(M);
     thrust::transform(
         sum_vals.begin(),
         sum_vals.begin() + M,
