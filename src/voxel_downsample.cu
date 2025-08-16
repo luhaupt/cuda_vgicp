@@ -10,7 +10,7 @@
 #include <thrust/reduce.h>
 #include <thrust/unique.h>
 #include <thrust/tuple.h>
-#include "benchmark/voxel_downsample.h"
+#include "../include/voxel_downsample.h"
 
 #include <cstdint>
 #include <iostream>
@@ -67,7 +67,7 @@ struct SumFloat4 {
     }
 };
 
-std::vector<float3> voxelgrid_downsample(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size) {
+std::vector<float3> cuda_vgicp::voxelgrid_downsample(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size) {
     size_t N = cloud->points.size();
     thrust::device_vector<pcl::PointXYZ> d_points = cloud->points;;
     thrust::device_vector<uint64_t> keys(N);

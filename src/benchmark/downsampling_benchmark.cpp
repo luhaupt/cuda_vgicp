@@ -4,8 +4,8 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include "benchmark.hpp"
-#include "point_cloud.hpp"
-#include "voxel_downsample.h"
+#include "../../include/point_cloud.hpp"
+#include "../../include/voxel_downsample.h"
 
 namespace cuda_vgicp {
 
