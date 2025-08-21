@@ -78,8 +78,7 @@ int main(int argc, char **argv) {
     for (double target = 1.0; target > 0.05; target -= 0.1) {
         const double downsampling_resolution = search_voxel_resolution(points[0]->size() * target);
         downsampling_resolutions.emplace_back(downsampling_resolution);
-        std::vector<float3> downsample = cuda_vgicp::voxelgrid_downsample(points[0], downsampling_resolution);
-        downsampled.insert(downsampled.end(), downsample.begin(), downsample.end());
+        downsampled = cuda_vgicp::voxelgrid_downsample(points[0], downsampling_resolution);
         std::cout << "downsampling_resolution=" << downsampling_resolution << std::endl;
         std::cout << "num_points=" << downsampled.size() << std::endl;
     }

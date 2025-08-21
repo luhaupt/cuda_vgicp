@@ -69,7 +69,7 @@ struct SumFloat4 {
 
 std::vector<float3> cuda_vgicp::voxelgrid_downsample(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size) {
     size_t N = cloud->points.size();
-    thrust::device_vector<pcl::PointXYZ> d_points = cloud->points;;
+    thrust::device_vector<pcl::PointXYZ> d_points = cloud->points;
     thrust::device_vector<uint64_t> keys(N);
     thrust::device_vector<float4> vals(N);
 
