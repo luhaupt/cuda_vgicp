@@ -4,9 +4,9 @@ cmake_install.cmake
 CMakeCache.txt
 Makefile
 
-# Data
+# Dataset
 kitti00
 
-# Temp
-downsampling_benchmark
-libcuda_implementation.a
+# Binaries
+*_benchmark
+*.a
