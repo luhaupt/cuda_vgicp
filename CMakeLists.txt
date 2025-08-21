@@ -5,23 +5,36 @@ find_package(Eigen3 CONFIG)
 find_package(PCL REQUIRED)
 find_package(CUDAToolkit 13 REQUIRED)
 find_package(fmt REQUIRED)
+find_package(CUDA REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-set(CUDA_IMPLEMENTATION
+add_library(cuda_vgicp
     src/voxel_downsample.cu
 )
-include_directories(${PCL_INCLUDE_DIRS} /usr/local/cuda-13.0/include)
+target_include_directories(cuda_vgicp PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(cuda_vgicp PUBLIC
+    fmt::fmt
+)
+
+include_directories(${PCL_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}/cccl
+)
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
-add_library(cuda_implementation STATIC ${CUDA_IMPLEMENTATION})
-target_compile_options(cuda_implementation PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
-set_target_properties(cuda_implementation PROPERTIES
-    CUDA_ARCHITECTURES 89
+target_compile_options(cuda_vgicp PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+)
+set_target_properties(cuda_vgicp PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_ARCHITECTURES "75;86;87;89"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -33,10 +46,25 @@ set_target_properties(cuda_implementation PROPERTIES
 add_executable(downsampling_benchmark
     src/benchmark/downsampling_benchmark.cpp
 )
-target_include_directories(downsampling_benchmark PRIVATE ${PCL_INCLUDE_DIRS})
+target_include_directories(downsampling_benchmark PRIVATE
+    ${PCL_INCLUDE_DIRS}
+)
 target_link_libraries(downsampling_benchmark PRIVATE
     fmt::fmt
     Eigen3::Eigen
     ${PCL_LIBRARIES}
-    cuda_implementation
+    cuda_vgicp
+)
+
+# Hash grid benchmark
+add_executable(hash_grid_benchmark
+    src/benchmark/hash_grid_benchmark.cu
+)
+target_include_directories(hash_grid_benchmark PRIVATE
+    ${PCL_INCLUDE_DIRS}
+)
+target_link_libraries(hash_grid_benchmark PRIVATE
+    cuda_vgicp
+    ${PCL_LIBRARIES}
+    CUDA::cudart
 )
