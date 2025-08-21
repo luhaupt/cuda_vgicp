@@ -8,8 +8,8 @@
 #include <deque>
 #include <filesystem>
 #include <fmt/format.h>
-#include "../../include/traits.hpp"
-#include "../../include/read_points.hpp"
+#include "traits.hpp"
+#include "read_points.hpp"
 #include <vector>
 
 namespace cuda_vgicp {
