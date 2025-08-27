@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
@@ -29,10 +31,12 @@ struct SpatialHashGrid {
     thrust::device_vector<int> cell_end;
     thrust::device_vector<int> sorted_indices;
     thrust::device_vector<uint32_t> cell_hashes;
+    float cell_size;
 
     // Builds a spatial hash grid for the point cloud and voxel size
     void build(const thrust::device_vector<float3>& points, float voxel_size) {
         int num_points = points.size();
+        this.cell_size = voxel_size;
         thrust::device_vector<uint32_t> cell_hashes_unsorted(num_points);
         thrust::device_vector<int> point_indices(num_points);
 
@@ -73,5 +77,65 @@ struct SpatialHashGrid {
         );
     }
 };
+
+__device__ void nearest_neighbor_search(
+    const SpatialHashGrid& grid,
+    const float3* points,
+    float3 query_point,
+    float search_radius,
+    int* neighbors,
+    int& num_neighbors,
+    int max_neighbors
+) {
+    float cell_size = grid.cell_size;
+    int search_cells = std::ceil(search_radius / cell_size);
+    num_neighbors = 0;
+
+    float3 center_cell = make_float3(
+        __float2int_rd(query_point.x / cell_size),
+        __float2int_rd(query_point.y / cell_size),
+        __float2int_rd(query_point.z / cell_size)
+    );
+
+    // Search neighbor cells
+    for (std::size_t dx = -search_cells; dx <= search_cells, dx++) {
+        for (std::size_t dy = -search_cells; dy <= search_cells, dy++) {
+            for (std::size_t dz = -search_cells; dz <= search_cells, dz++) {
+                float3 cell = make_float3(
+                    center_cell.x + dx,
+                    center_cell.y + dy,
+                    center_cell.z + dz
+                );
+
+                uint32_t hash = ComputeHash(cell);
+                auto it = thrust::lower_bound(
+                    thrust::seq,
+                    grid.cell_hashes.data(),
+                    grid.cell_hashes.data() + grid.cell_hashes.size(),
+                    hash
+                );
+
+                if (it != grid.cell_hashes.end() && *it == hash) {
+                    int start = it - grid.cell_hashes.data();
+                    int end = thrust::upper_bound(thrust::seq,
+                        grid.cell_hashes.data() + start,
+                        grid.cell_hashes.data() + grid.cell_hashes.size(),
+                        hash
+                    ) - grid.cell_hashes.data();
+
+                    for (int i = start; i < end && num_neighbors < max_neighbors; i++) {
+                        int point_idx = grid.sorted_indices[i];
+                        float3 p = points[point_idx];
+                        float dist = length(p - query_point);
+
+                        if (dist <= search_radius) {
+                            neighbors[num_neighbors++] = point_idx;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 } // cuda_vgicp
