@@ -5,7 +5,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include "../../include/hash_grid.cuh"
-#include "../../include/voxel_downsample.h"
+#include "../../include/voxel_downsample.cuh"
 
 int main(int argc, char **argv) {
     // Input parameters

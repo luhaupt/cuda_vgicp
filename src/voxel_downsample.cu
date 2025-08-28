@@ -10,103 +10,94 @@
 #include <thrust/reduce.h>
 #include <thrust/unique.h>
 #include <thrust/tuple.h>
-#include "../include/voxel_downsample.h"
+#include "../include/voxel_downsample.cuh"
 
 #include <cstdint>
 #include <iostream>
 #include <vector>
 
-// -- pack voxel coordinate (x,y,z) into uint64_t using 21 bits per axis (same as original)
-__host__ __device__ inline uint64_t pack_voxel_key(int vx, int vy, int vz) {
-    const uint64_t mask = ((1ull << 21) - 1ull);
-    return ((uint64_t)(vx & mask)) | (((uint64_t)(vy & mask)) << 21) | (((uint64_t)(vz & mask)) << 42);
+__global__ void voxelgrid_kernel(
+    const float3* points,
+    int N,
+    float leaf_size,
+    Voxel* voxels,
+    int max_voxels
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+
+    float3 p = points[idx];
+    int ix = floorf(p.x / leaf_size);
+    int iy = floorf(p.y / leaf_size);
+    int iz = floorf(p.z / leaf_size);
+    uint32_t hash = ix * 73856093 ^ iy * 19349663 ^ iz * 83492791;
+    uint32_t v_idx = hash % max_voxels;
+
+    atomicAdd(&voxels[v_idx].x, p.x);
+    atomicAdd(&voxels[v_idx].y, p.y);
+    atomicAdd(&voxels[v_idx].z, p.z);
+    atomicAdd(&voxels[v_idx].count, 1);
 }
 
-struct ComputeKeyAndValue {
-    float inv_leaf;
-    int offset;
-    __host__ __device__
-    ComputeKeyAndValue(float leaf) : inv_leaf(1.f / leaf), offset(1 << 20) {}
+__global__ void compute_centroids(
+    const Voxel* voxels,
+    int max_voxels,
+    float3* centroids,
+    int* amount_centroids
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= max_voxels) return;
 
-    __host__ __device__
-    thrust::tuple<uint64_t, float4> operator()(const pcl::PointXYZ& point) const {
-        float x = point.x;
-        float y = point.y;
-        float z = point.z;
-
-        int vx = static_cast<int>(floorf(x * inv_leaf)) + offset;
-        int vy = static_cast<int>(floorf(y * inv_leaf)) + offset;
-        int vz = static_cast<int>(floorf(z * inv_leaf)) + offset;
-
-        const int maxcoord = (1 << 21) - 1;
-
-        uint64_t key;
-        if (vx < 0 || vy < 0 || vz < 0 || vx > maxcoord || vy > maxcoord || vz > maxcoord) {
-            key = ~0ull;
-        } else {
-            key = pack_voxel_key(vx, vy, vz);
-        }
-        return thrust::make_tuple(key, make_float4(x, y, z, 1.f));
+    if(voxels[idx].count > 0) {
+        centroids[idx] = make_float3(
+            voxels[idx].x / voxels[idx].count,
+            voxels[idx].y / voxels[idx].count,
+            voxels[idx].z / voxels[idx].count
+        );
+        atomicAdd(amount_centroids, 1);
     }
-};
-
-struct SumPoint {
-    __host__ __device__ thrust::tuple<float,float,float,float> operator()(const thrust::tuple<float,float,float,float>& a,
-                                                                         const thrust::tuple<float,float,float,float>& b) const {
-        return thrust::make_tuple(thrust::get<0>(a)+thrust::get<0>(b),
-                                  thrust::get<1>(a)+thrust::get<1>(b),
-                                  thrust::get<2>(a)+thrust::get<2>(b),
-                                  thrust::get<3>(a)+thrust::get<3>(b));
-    }
-};
-
-struct SumFloat4 {
-    __host__ __device__
-    float4 operator()(const float4& a, const float4& b) const {
-        return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
-    }
-};
+}
 
 std::vector<float3> cuda_vgicp::voxelgrid_downsample(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size) {
     size_t N = cloud->points.size();
-    thrust::device_vector<pcl::PointXYZ> d_points = cloud->points;
-    thrust::device_vector<uint64_t> keys(N);
-    thrust::device_vector<float4> vals(N);
+    int threadsPerBlock, minBlocksCent;
+    cudaOccupancyMaxPotentialBlockSize(&minBlocksCent, &threadsPerBlock, voxelgrid_kernel, 0, 0);
+    int blocks = (N + threadsPerBlock - 1) / threadsPerBlock;
+    float3* d_points;
 
-    auto key_val_zip = thrust::make_zip_iterator(thrust::make_tuple(keys.begin(), vals.begin()));
-    thrust::transform(d_points.begin(), d_points.end(), key_val_zip, ComputeKeyAndValue(leaf_size));
-    thrust::sort_by_key(keys.begin(), keys.end(), vals.begin());
+    cudaMalloc(&d_points, N * sizeof(float3));
+    cudaMemcpy(d_points, cloud->points.data(), N * sizeof(float3), cudaMemcpyHostToDevice);
 
-    auto valid_end = thrust::find(keys.begin(), keys.end(), ~0ull);
-    size_t valid_n = thrust::distance(keys.begin(), valid_end);
-    if (valid_n == 0) return {};
+    int max_voxels = 2 * N;
+    Voxel* d_voxels;
+    cudaMalloc(&d_voxels, max_voxels * sizeof(Voxel));
+    cudaMemset(d_voxels, 0, max_voxels * sizeof(Voxel));
 
-    thrust::device_vector<uint64_t> unique_keys(valid_n);
-    thrust::device_vector<float4> sum_vals(valid_n);
+    // Synchronize device after voxelgrid calculation
+    voxelgrid_kernel<<<blocks, threadsPerBlock>>>(d_points, N, leaf_size, d_voxels, max_voxels);
+    cudaDeviceSynchronize();
 
-    auto reduce_end = thrust::reduce_by_key(
-        keys.begin(), keys.begin() + valid_n,
-        vals.begin(),
-        unique_keys.begin(),
-        sum_vals.begin(),
-        thrust::equal_to<uint64_t>(),
-        SumFloat4()
-    );
+    // Synchronize device after centroid calculation
+    float3* d_centroids;
+    int* d_amount_centroids;
+    cudaMalloc(&d_centroids, max_voxels * sizeof(float3));
+    cudaMalloc(&d_amount_centroids, sizeof(int));
+    cudaMemset(d_amount_centroids, 0, sizeof(int));
+    cudaOccupancyMaxPotentialBlockSize(&minBlocksCent, &threadsPerBlock, compute_centroids, 0, 0);
+    int blocks_vox = (max_voxels + threadsPerBlock - 1) / threadsPerBlock;
+    compute_centroids<<<blocks_vox, threadsPerBlock>>>(d_voxels, max_voxels, d_centroids, d_amount_centroids);
+    cudaDeviceSynchronize();
 
-    size_t M = reduce_end.first - unique_keys.begin();
-    thrust::device_vector<float3> centroids(M);
-    thrust::transform(
-        sum_vals.begin(),
-        sum_vals.begin() + M,
-        centroids.begin(),
-        [] __device__ (const float4& s) {
-            float inv_count = 1.f / s.w;
-            return make_float3(s.x * inv_count, s.y * inv_count, s.z * inv_count);
-        }
-    );
+    int amount_centroids;
+    cudaMemcpy(&amount_centroids, d_amount_centroids, sizeof(int), cudaMemcpyDeviceToHost);
+    std::vector<float3> downsampled(amount_centroids);
+    cudaMemcpy(downsampled.data(), d_centroids, amount_centroids * sizeof(float3), cudaMemcpyDeviceToHost);
 
-    std::vector<float3> downsampled_points(M);
-    thrust::copy_n(centroids.begin(), M, downsampled_points.begin());
+    // Free allocated memory
+    cudaFree(d_points);
+    cudaFree(d_voxels);
+    cudaFree(d_centroids);
+    cudaFree(d_amount_centroids);
 
-    return downsampled_points;
+    return downsampled;
 }

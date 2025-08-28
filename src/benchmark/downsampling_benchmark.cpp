@@ -5,7 +5,7 @@
 #include <pcl/point_types.h>
 #include "../../include/benchmark.hpp"
 #include "../../include/point_cloud.hpp"
-#include "../../include/voxel_downsample.h"
+#include "../../include/voxel_downsample.cuh"
 
 namespace cuda_vgicp {
 
