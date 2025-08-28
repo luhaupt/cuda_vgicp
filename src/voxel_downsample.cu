@@ -105,8 +105,8 @@ std::vector<float3> cuda_vgicp::voxelgrid_downsample(const pcl::PointCloud<pcl::
         }
     );
 
-    std::vector<float3> out(M);
-    thrust::copy_n(centroids.begin(), M, out.begin());
+    std::vector<float3> downsampled_points(M);
+    thrust::copy_n(centroids.begin(), M, downsampled_points.begin());
 
-    return out;
+    return downsampled_points;
 }

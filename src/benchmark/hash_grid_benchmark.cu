@@ -8,6 +8,7 @@
 #include "../../include/voxel_downsample.h"
 
 int main(int argc, char **argv) {
+    // Input parameters
     if (argc < 2) {
         std::cout << "USAGE: ./hash_grid_benchmark <dataset_path>" << std::endl;
         return 0;
@@ -30,6 +31,7 @@ int main(int argc, char **argv) {
     std::cout << "num_trials=" << num_trials << std::endl;
     std::cout << "method=cuda_vgicp" << std::endl;
 
+    // Get dataset and convert to vector
     cuda_vgicp::KittiDataset kitti(dataset_path, 1000);
     const auto raw_points = kitti.convert<pcl::PointCloud<pcl::PointXYZ>>(true);
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> points{ raw_points };
