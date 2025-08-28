@@ -23,20 +23,47 @@ __global__ void voxelgrid_kernel(
     Voxel* voxels,
     int max_voxels
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
+    // Share local voxel array inside blocks
+    extern __shared__ Voxel s_voxels[];
+    int tid = threadIdx.x;
+    int blockOffset = blockIdx.x * blockDim.x;
 
-    float3 p = points[idx];
-    int ix = floorf(p.x / leaf_size);
-    int iy = floorf(p.y / leaf_size);
-    int iz = floorf(p.z / leaf_size);
-    uint32_t hash = ix * 73856093 ^ iy * 19349663 ^ iz * 83492791;
-    uint32_t v_idx = hash % max_voxels;
+    for (int i = tid; i < max_voxels; i += blockDim.x) {
+        s_voxels[i].x = 0.f;
+        s_voxels[i].y = 0.f;
+        s_voxels[i].z = 0.f;
+        s_voxels[i].count = 0;
+    }
 
-    atomicAdd(&voxels[v_idx].x, p.x);
-    atomicAdd(&voxels[v_idx].y, p.y);
-    atomicAdd(&voxels[v_idx].z, p.z);
-    atomicAdd(&voxels[v_idx].count, 1);
+    __syncthreads();
+
+    // Local accumulation in shared memory
+    for(int idx = blockOffset + tid; idx < N; idx += gridDim.x * blockDim.x) {
+        float3 p = points[idx];
+
+        int ix = static_cast<int>(floorf(p.x / leaf_size));
+        int iy = static_cast<int>(floorf(p.y / leaf_size));
+        int iz = static_cast<int>(floorf(p.z / leaf_size));
+
+        int v_idx = ((ix * 73856093 ^ iy * 19349663 ^ iz * 83492791) & 0x7fffffff) % max_voxels;
+
+        atomicAdd(&s_voxels[v_idx].x, p.x);
+        atomicAdd(&s_voxels[v_idx].y, p.y);
+        atomicAdd(&s_voxels[v_idx].z, p.z);
+        atomicAdd(&s_voxels[v_idx].count, 1);
+    }
+
+    __syncthreads();
+
+    // Write shared local voxel array to global voxel array
+    for(int i = tid; i < max_voxels; i += blockDim.x) {
+        if(s_voxels[i].count > 0) {
+            atomicAdd(&voxels[i].x, s_voxels[i].x);
+            atomicAdd(&voxels[i].y, s_voxels[i].y);
+            atomicAdd(&voxels[i].z, s_voxels[i].z);
+            atomicAdd(&voxels[i].count, s_voxels[i].count);
+        }
+    }
 }
 
 __global__ void compute_centroids(
