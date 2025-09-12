@@ -11,22 +11,30 @@ namespace cuda_vgicp {
 
 template <typename PointCloudPtr>
 void benchmark(const std::vector<PointCloudPtr> &raw_points, double leaf_size) {
-  Stopwatch sw;
-  Summarizer times;
-  Summarizer num_points;
+    Stopwatch sw;
+    Summarizer times;
+    Summarizer num_points;
 
-  sw.start();
-  for (const auto &points : raw_points) {
-    auto downsampled = cuda_vgicp::voxelgrid_downsample(points, leaf_size);
+    for (const auto &points : raw_points) {
+        float3* d_points;
+        int* d_num_unique_cells;
+        size_t N = points->size();
+        cudaMalloc(&d_points, N * sizeof(float3));
+        cudaMemcpy(d_points, points->data(), N * sizeof(float3), cudaMemcpyHostToDevice);
+        cudaMalloc(&d_num_unique_cells, sizeof(int));
 
-    sw.lap();
-    times.push(sw.msec());
-    num_points.push(downsampled.size());
-  }
+        sw.start();
+        cuda_vgicp::voxelgrid_downsample(d_points, N, leaf_size, d_num_unique_cells);
+        sw.lap();
+        times.push(sw.msec());
+        int h_voxel = 0;
+        cudaMemcpy(&h_voxel, d_num_unique_cells, sizeof(int), cudaMemcpyDeviceToHost);
+        num_points.push(h_voxel);
+        cudaFree(d_num_unique_cells);
+        cudaFree(d_points);
+    }
 
-  std::cout << fmt::format("{} [msec/scan]   {} [points]", times.str(),
-                           num_points.str())
-            << std::endl;
+    std::cout << fmt::format("{} [msec/scan]   {} [points]", times.str(), num_points.str()) << std::endl;
 }
 
 } // namespace cuda_vgicp

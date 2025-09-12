@@ -34,7 +34,7 @@ target_compile_options(cuda_vgicp PRIVATE
 )
 set_target_properties(cuda_vgicp PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
-    CUDA_ARCHITECTURES "75;86;87;89"
+    CUDA_ARCHITECTURES "89"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -44,7 +44,7 @@ set_target_properties(cuda_vgicp PROPERTIES
 
 # Downsampling benchmark
 add_executable(downsampling_benchmark
-    src/benchmark/downsampling_benchmark.cpp
+    src/benchmark/downsampling_benchmark.cu
 )
 target_include_directories(downsampling_benchmark PRIVATE
     ${PCL_INCLUDE_DIRS}
@@ -57,14 +57,27 @@ target_link_libraries(downsampling_benchmark PRIVATE
 )
 
 # Hash grid benchmark
-add_executable(hash_grid_benchmark
-    src/benchmark/hash_grid_benchmark.cu
-)
-target_include_directories(hash_grid_benchmark PRIVATE
-    ${PCL_INCLUDE_DIRS}
-)
-target_link_libraries(hash_grid_benchmark PRIVATE
-    cuda_vgicp
-    ${PCL_LIBRARIES}
-    CUDA::cudart
-)
+# add_executable(hash_grid_benchmark
+#     src/benchmark/hash_grid_benchmark.cu
+# )
+# target_include_directories(hash_grid_benchmark PRIVATE
+#     ${PCL_INCLUDE_DIRS}
+# )
+# target_link_libraries(hash_grid_benchmark PRIVATE
+#     cuda_vgicp
+#     ${PCL_LIBRARIES}
+#     CUDA::cudart
+# )
+
+# NNS benchmark
+# add_executable(nns_benchmark
+#     src/benchmark/nns_benchmark.cu
+# )
+# target_include_directories(nns_benchmark PRIVATE
+#     ${PCL_INCLUDE_DIRS}
+# )
+# target_link_libraries(nns_benchmark PRIVATE
+#     cuda_vgicp
+#     ${PCL_LIBRARIES}
+#     CUDA::cudart
+# )

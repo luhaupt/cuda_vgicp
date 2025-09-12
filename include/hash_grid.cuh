@@ -10,130 +10,274 @@
 #include <thrust/sort.h>
 #include <vector_types.h>
 
+#define K_NEIGHBORS 20
+
 namespace cuda_vgicp {
 
-struct Hash {
-    float cell_size;
-    __host__ __device__ Hash(float c) : cell_size(c) {}
+__device__ __forceinline__ uint32_t hash_coord(int x, int y, int z) {
+    return x * 73856093u ^ y * 19349663u ^ z * 83492791u;
+}
 
-    // Calculates the hash of a point based on its cell index
-    __device__ uint32_t operator()(const float3& point) const {
-        int ix = static_cast<int>(floorf(point.x / this->cell_size));
-        int iy = static_cast<int>(floorf(point.y / this->cell_size));
-        int iz = static_cast<int>(floorf(point.z / this->cell_size));
-
-        return ix * 73856093u ^ iy * 19349663u ^ iz * 83492791u;
+__global__
+void init_indices_and_compute_cell_hashes_kernel(
+    const float3* __restrict__ d_points,
+    const size_t N,
+    const float cell_size,
+    int* __restrict__ point_indices,
+    uint32_t* __restrict__ point_cell_hashes
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) {
+        return;
     }
-};
 
-struct SpatialHashGrid {
-    thrust::device_vector<int> point_indices;
-    thrust::device_vector<uint32_t> cell_hashes;
-    thrust::device_vector<int> cell_start;
-    thrust::device_vector<int> cell_end;
-    thrust::device_vector<int> num_runs{1};
-    float cell_size;
+    // Get index of cell for point
+    float3 p = d_points[idx];
 
-    // Builds a spatial hash grid for the point cloud and voxel size
-    __host__ __device__ void build(const thrust::device_vector<float3>& points, float voxel_size) {
-        int num_points = points.size();
-        this->point_indices.resize(num_points);
-        this->cell_hashes.resize(num_points);
-        this->cell_start.resize(num_points);
-        this->cell_end.resize(num_points);
-
-        // Set cell size > voxel/leaf size (downsampling)
-        this->cell_size = voxel_size * 2.0;
-
-        thrust::sequence(point_indices.begin(), point_indices.end());
-        thrust::transform(
-            points.begin(), points.end(),
-            this->cell_hashes.begin(),
-            Hash(this->cell_size)
-        );
-
-        thrust::sort_by_key(this->cell_hashes.begin(), this->cell_hashes.end(), this->point_indices.begin());
-
-        size_t temp_storage_bytes = 0;
-        cub::DeviceRunLengthEncode::Encode(
-            nullptr, temp_storage_bytes,
-            thrust::raw_pointer_cast(this->cell_hashes.data()),
-            thrust::raw_pointer_cast(this->cell_start.data()),
-            thrust::raw_pointer_cast(this->cell_end.data()),
-            thrust::raw_pointer_cast(this->num_runs.data()),
-            num_points
-        );
-
-        thrust::device_vector<char> temp_storage(temp_storage_bytes);
-        cub::DeviceRunLengthEncode::Encode(
-            thrust::raw_pointer_cast(temp_storage.data()), temp_storage_bytes,
-            thrust::raw_pointer_cast(this->cell_hashes.data()),
-            thrust::raw_pointer_cast(this->cell_start.data()),
-            thrust::raw_pointer_cast(this->cell_end.data()),
-            thrust::raw_pointer_cast(this->num_runs.data()),
-            num_points
-        );
+    if (!isfinite(p.x) || !isfinite(p.y) || !isfinite(p.z)) {
+        return;
     }
-};
 
-// __device__ void nearest_neighbor_search(
-//     const SpatialHashGrid& grid,
-//     const float3* points,
-//     float3 query_point,
-//     float search_radius,
-//     int* neighbors,
-//     int& num_neighbors,
-//     int max_neighbors
-// ) {
-//     float cell_size = grid.cell_size;
-//     int search_cells = std::ceil(search_radius / cell_size);
-//     num_neighbors = 0;
+    int cell_x = floorf(p.x / cell_size);
+    int cell_y = floorf(p.y / cell_size);
+    int cell_z = floorf(p.z / cell_size);
 
-//     float3 center_cell = make_float3(
-//         __float2int_rd(query_point.x / cell_size),
-//         __float2int_rd(query_point.y / cell_size),
-//         __float2int_rd(query_point.z / cell_size)
-//     );
+    // Set point index and cell hash (of point)
+    point_indices[idx]      = idx;
+    uint32_t hash           = hash_coord(cell_x, cell_y, cell_z);
+    point_cell_hashes[idx]  = hash;
+}
 
-//     // Search neighbor cells
-//     for (std::size_t dx = -search_cells; dx <= search_cells, dx++) {
-//         for (std::size_t dy = -search_cells; dy <= search_cells, dy++) {
-//             for (std::size_t dz = -search_cells; dz <= search_cells, dz++) {
-//                 float3 cell = make_float3(
-//                     center_cell.x + dx,
-//                     center_cell.y + dy,
-//                     center_cell.z + dz
-//                 );
+__global__
+void compute_cell_ranges_kernel(
+    const uint32_t* __restrict__ point_cell_hashes,
+    int* __restrict__ cell_start,
+    int* __restrict__ cell_end,
+    uint32_t* __restrict__ unique_point_cell_hashes,
+    int N
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) {
+        return;
+    }
 
-//                 uint32_t hash = ComputeHash(cell);
-//                 auto it = thrust::lower_bound(
-//                     thrust::seq,
-//                     grid.cell_hashes.data(),
-//                     grid.cell_hashes.data() + grid.cell_hashes.size(),
-//                     hash
-//                 );
+    uint32_t hash = point_cell_hashes[idx];
 
-//                 if (it != grid.cell_hashes.end() && *it == hash) {
-//                     int start = it - grid.cell_hashes.data();
-//                     int end = thrust::upper_bound(thrust::seq,
-//                         grid.cell_hashes.data() + start,
-//                         grid.cell_hashes.data() + grid.cell_hashes.size(),
-//                         hash
-//                     ) - grid.cell_hashes.data();
+    // Is new cell beginning?
+    if (idx == 0 || hash != point_cell_hashes[idx - 1]) {
+        int cell_id = idx;
+        cell_start[cell_id] = idx;
+        unique_point_cell_hashes[cell_id] = hash;
 
-//                     for (int i = start; i < end && num_neighbors < max_neighbors; i++) {
-//                         int point_idx = grid.sorted_indices[i];
-//                         float3 p = points[point_idx];
-//                         float dist = length(p - query_point);
+        // End der vorherigen Zelle
+        if (idx > 0) {
+            int prev_cell_id = idx - 1;
+            cell_end[prev_cell_id] = idx;
+        }
+    }
 
-//                         if (dist <= search_radius) {
-//                             neighbors[num_neighbors++] = point_idx;
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-//     }
-// }
+    // Last cell
+    if (idx == N - 1) {
+        int last_cell_id = idx;
+        cell_end[last_cell_id] = N;
+    }
+}
+
+__device__
+float dist2(float3 a, float3 b) {
+    float dx = a.x - b.x;
+    float dy = a.y - b.y;
+    float dz = a.z - b.z;
+
+    // The calculation including square root is computationally expensive
+    // and the relative comparison results in the same outcome without
+    return dx * dx + dy * dy + dz * dz;
+}
+
+__global__
+void find_k_nearest_neighbors_kernel(
+    const float3* __restrict__ points,
+    size_t N,
+    const uint32_t* __restrict__ point_cell_hashes,
+    const int* __restrict__ point_indices,
+    const uint32_t* __restrict__ unique_point_cell_hashes,
+    const int* __restrict__ cell_start,
+    const int* __restrict__ cell_end,
+    const int* __restrict__ num_cells,
+    float cell_size,
+    int* __restrict__ neighbor_indices
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= N) return;
+
+    // Init neighbor array
+    float3 p = points[idx];
+    float best_dist[K_NEIGHBORS];
+    int best_idx[K_NEIGHBORS];
+    for(size_t i = 0; i < K_NEIGHBORS; i++) {
+        best_dist[i]=1e30f; best_idx[i]=-1;
+    }
+
+    int cell_x = floorf(p.x / cell_size);
+    int cell_y = floorf(p.y / cell_size);
+    int cell_z = floorf(p.z / cell_size);
+
+    bool done = false;
+    int iter = 0;
+
+    // Iterative expanding nearest neighbor search
+    while (!done && iter < 10) {
+        for(size_t dx = -iter; dx <= iter; dx++)
+        for(size_t dy = -iter; dy <= iter; dy++)
+        for(size_t dz = -iter; dz <= iter; dz++) {
+            uint32_t nhash = hash_coord(
+                cell_x + dx,
+                cell_y + dy,
+                cell_z + dz
+            );
+
+            // Linear search
+            for(int c = 0 ; c < num_cells[0]; c++){
+                if (unique_point_cell_hashes[c] != nhash) {
+                    continue;
+                }
+
+                for (int j = cell_start[c]; j < cell_end[c]; j++) {
+                    int pid = point_indices[j];
+                    if (pid == idx) {
+                        continue;
+                    }
+
+                    float distance  = dist2(p, points[pid]);
+                    int max_i       = 0;
+                    float max_d     = best_dist[0];
+
+                    for (int k = 1; k < K_NEIGHBORS; k++) {
+                        if (best_dist[k] > max_d) {
+                            max_d = best_dist[k];
+                            max_i = k;
+                        }
+                    }
+
+                    if (distance < max_d) {
+                        best_dist[max_i] = distance;
+                        best_idx[max_i] = pid;
+                    }
+                }
+            }
+        }
+
+        // Check if all neighbor slots have been filled
+        done = true;
+        for(int k = 0; k < K_NEIGHBORS; k++) {
+            if(best_idx[k] < 0) {
+                done = false;
+            }
+        }
+        iter++;
+    }
+
+    for(int k = 0; k < K_NEIGHBORS; k++) {
+        neighbor_indices[idx * K_NEIGHBORS + k] = best_idx[k];
+    }
+}
+
+__device__ inline void accumulate_cov(float* cov, float3 d) {
+	cov[0] += d.x * d.x; // xx
+	cov[1] += d.y * d.y; // yy
+	cov[2] += d.z * d.z; // zz
+	cov[3] += d.x * d.y; // xy
+	cov[4] += d.x * d.z; // xz
+	cov[5] += d.y * d.z; // yz
+}
+
+__global__
+void compute_point_covariances_kernel(
+	const float3* __restrict__ points,
+	size_t N,
+	const int* __restrict__ neighbor_indices,
+	float* __restrict__ point_covariances
+) {
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx >= N) {
+	    return;
+	}
+
+	// Compute local mean
+	float3 mean = make_float3(0, 0, 0);
+	for (size_t i = 0; i < K_NEIGHBORS; i++) {
+		int n_idx = neighbor_indices[idx * K_NEIGHBORS + i];
+		float3 q = points[n_idx];
+		mean.x += q.x;
+		mean.y += q.y;
+		mean.z += q.z;
+	}
+
+	mean.x /= K_NEIGHBORS;
+	mean.y /= K_NEIGHBORS;
+	mean.z /= K_NEIGHBORS;
+
+	// Compute covariance
+	float cov[6] = {0};
+	for (size_t i = 0; i < K_NEIGHBORS; i++) {
+		int n_idx = neighbor_indices[idx * K_NEIGHBORS + i];
+		float3 q = points[n_idx];
+		float3 d = make_float3(q.x - mean.x, q.y - mean.y, q.z - mean.z);
+		accumulate_cov(cov, d);
+	}
+
+	// Normalize by (k-1) for unbiased covariance
+	float norm = 1.0f / max(1, K_NEIGHBORS - 1);
+	for (size_t i = 0; i < 6; i++) {
+		point_covariances[idx * 6 + i] = cov[i] * norm;
+	}
+}
+
+__global__
+void compute_voxel_means_and_covariances_kernel(
+    const float3* __restrict__ points,
+	const int* __restrict__ cell_start,
+	const int* __restrict__ cell_end,
+	const int* num_unique_cells,
+	const float* __restrict__ point_covariances,
+	float* __restrict__ voxel_centroids,
+	float* __restrict__ voxel_covariances
+) {
+	int cell_idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (cell_idx >= num_unique_cells[0]) {
+	    return;
+	}
+
+	int start = cell_start[cell_idx];
+	int end   = cell_end[cell_idx];
+	int count = end - start;
+
+	// Calculate voxel centroid
+	float3 mean = make_float3(0, 0, 0);
+	for (int i = start; i < end; i++) {
+		mean.x += points[i].x;
+		mean.y += points[i].y;
+		mean.z += points[i].z;
+	}
+
+	mean.x /= count;
+	mean.y /= count;
+	mean.z /= count;
+	voxel_centroids[cell_idx * 3] = mean.x;
+	voxel_centroids[cell_idx * 3 + 1] = mean.y;
+	voxel_centroids[cell_idx * 3 + 2] = mean.z;
+
+	// Calculate voxel covariance
+	float cov[6] = {0};
+	for (int i = start; i < end; i++) {
+		for (int j = 0; j < 6; j++) {
+			cov[j] += point_covariances[i * 6 + j];
+		}
+	}
+	float norm = 1.0f / (float)count;
+	for (int j = 0; j < 6; j++) {
+		voxel_covariances[cell_idx * 6 + j] = cov[j] * norm;
+	}
+}
 
 } // cuda_vgicp
