@@ -68,7 +68,8 @@ void cuda_vgicp::voxelgrid_downsample(
         d_point_indices,
         d_point_cell_hashes
     );
-    cudaDeviceSynchronize();
+
+    /// 0.74 msec/scan
 
     // Sort point indices by cell hash
     size_t temp_bytes = 0;
@@ -116,6 +117,8 @@ void cuda_vgicp::voxelgrid_downsample(
     );
     cudaFree(rle_temp);
 
+    /// 0.93 msec/scan
+
     compute_cell_ranges_kernel<<<blocks, threadsPerBlock>>>(
         d_point_cell_hashes,
         d_cell_start,
@@ -123,21 +126,26 @@ void cuda_vgicp::voxelgrid_downsample(
         d_unique_point_cell_hashes,
         N
     );
-    cudaDeviceSynchronize();
+
+    /// 0.93 msec/scan
 
     find_k_nearest_neighbors_kernel<<<blocks, threadsPerBlock>>>(
         d_points,
         N,
-        d_point_cell_hashes,
         d_point_indices,
         d_unique_point_cell_hashes,
         d_cell_start,
         d_cell_end,
         d_num_unique_cells,
+        d_points_per_cell,
         leaf_size,
         d_neighbor_indices
     );
-    cudaDeviceSynchronize();
+
+    /// 20 Nachbarn
+    /// 111.4 - 1.7     msec/scan --- BOTTLENECK
+    /// 104.2 - 1.65    msec/scan --- BOTTLENECK (ohne iterativer Ansatz)
+    /// 72.69 - 2.2     msec/scan --- knn - Fallback mit nur einer Zelle
 
     compute_point_covariances_kernel<<<blocks, threadsPerBlock>>>(
         d_points,
@@ -145,7 +153,6 @@ void cuda_vgicp::voxelgrid_downsample(
         d_neighbor_indices,
         d_point_covariances
     );
-    cudaDeviceSynchronize();
 
     compute_voxel_means_and_covariances_kernel<<<blocks, threadsPerBlock>>>(
         d_points,
@@ -156,7 +163,6 @@ void cuda_vgicp::voxelgrid_downsample(
         d_voxel_centroids,
         d_voxel_covariances
     );
-    cudaDeviceSynchronize();
 
     cudaFree(d_point_indices);
     cudaFree(d_point_cell_hashes);

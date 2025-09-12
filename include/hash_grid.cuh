@@ -14,8 +14,27 @@
 
 namespace cuda_vgicp {
 
-__device__ __forceinline__ uint32_t hash_coord(int x, int y, int z) {
-    return x * 73856093u ^ y * 19349663u ^ z * 83492791u;
+__device__ __forceinline__ uint32_t hash_coord(int3 coord) {
+    return coord.x * 73856093u ^ coord.y * 19349663u ^ coord.z * 83492791u;
+}
+
+__device__ __forceinline__ int3 get_cell_index(float3 point, float cell_size) {
+    return make_int3(
+        floorf(point.x / cell_size),
+        floorf(point.y / cell_size),
+        floorf(point.z / cell_size)
+    );
+}
+
+__device__ __forceinline__ int find_hash_index(uint32_t hash, const uint32_t* hashes, int size) {
+    int left = 0, right = size - 1;
+    while (left <= right) {
+        int mid = left + (right - left) / 2;
+        if (hashes[mid] == hash) return mid;
+        if (hashes[mid] < hash) left = mid + 1;
+        else right = mid - 1;
+    }
+    return -1;
 }
 
 __global__
@@ -38,13 +57,11 @@ void init_indices_and_compute_cell_hashes_kernel(
         return;
     }
 
-    int cell_x = floorf(p.x / cell_size);
-    int cell_y = floorf(p.y / cell_size);
-    int cell_z = floorf(p.z / cell_size);
+    int3 cell_index = get_cell_index(p, cell_size);
 
     // Set point index and cell hash (of point)
     point_indices[idx]      = idx;
-    uint32_t hash           = hash_coord(cell_x, cell_y, cell_z);
+    uint32_t hash           = hash_coord(cell_index);
     point_cell_hashes[idx]  = hash;
 }
 
@@ -97,63 +114,122 @@ float dist2(float3 a, float3 b) {
 __global__
 void find_k_nearest_neighbors_kernel(
     const float3* __restrict__ points,
-    size_t N,
-    const uint32_t* __restrict__ point_cell_hashes,
+    const size_t N,
     const int* __restrict__ point_indices,
     const uint32_t* __restrict__ unique_point_cell_hashes,
     const int* __restrict__ cell_start,
     const int* __restrict__ cell_end,
-    const int* __restrict__ num_cells,
+    const int* __restrict__ num_unique_cells,
+    const int* __restrict__ points_per_cell,
     float cell_size,
     int* __restrict__ neighbor_indices
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx >= N) return;
-
-    // Init neighbor array
-    float3 p = points[idx];
-    float best_dist[K_NEIGHBORS];
-    int best_idx[K_NEIGHBORS];
-    for(size_t i = 0; i < K_NEIGHBORS; i++) {
-        best_dist[i]=1e30f; best_idx[i]=-1;
+    if(idx >= N) {
+        return;
     }
 
-    int cell_x = floorf(p.x / cell_size);
-    int cell_y = floorf(p.y / cell_size);
-    int cell_z = floorf(p.z / cell_size);
+    float3 query_point = points[idx];
+    int3 query_cell_index = get_cell_index(query_point, cell_size);
+    int existing_query_cell_index = find_hash_index(
+        hash_coord(query_cell_index),
+        unique_point_cell_hashes,
+        num_unique_cells[0]
+    );
+    float best_dist[K_NEIGHBORS];
+    int best_idx[K_NEIGHBORS];
 
-    bool done = false;
-    int iter = 0;
+    #pragma unroll
+    for(int k = 0; k < K_NEIGHBORS; k++){
+        best_dist[k] = 1e30f;
+        best_idx[k]  = -1;
+    }
 
-    // Iterative expanding nearest neighbor search
-    while (!done && iter < 10) {
-        for(size_t dx = -iter; dx <= iter; dx++)
-        for(size_t dy = -iter; dy <= iter; dy++)
-        for(size_t dz = -iter; dz <= iter; dz++) {
-            uint32_t nhash = hash_coord(
-                cell_x + dx,
-                cell_y + dy,
-                cell_z + dz
-            );
+    if (existing_query_cell_index != -1 && points_per_cell[existing_query_cell_index] >= K_NEIGHBORS + 1) {
+        int start = cell_start[existing_query_cell_index];
+        int end   = cell_end[existing_query_cell_index];
 
-            // Linear search
-            for(int c = 0 ; c < num_cells[0]; c++){
-                if (unique_point_cell_hashes[c] != nhash) {
+        for(int i = start; i < end; i++){
+            int pid = point_indices[i];
+            if(pid == idx) {
+                continue;
+            }
+
+            float3 p = points[pid];
+            float distance = cuda_vgicp::dist2(query_point, p);
+            int max_i = 0;
+            float max_d = best_dist[0];
+            for(int k = 1; k < K_NEIGHBORS; k++){
+                if(best_dist[k] > max_d){
+                    max_d = best_dist[k];
+                    max_i = k;
+                }
+            }
+
+            if(distance < max_d){
+                best_dist[max_i] = distance;
+                best_idx[max_i] = pid;
+            }
+        }
+    } else {
+        bool done = false;
+        int iter = 0;
+
+        // Iterative expanding nearest neighbor search
+        while (!done && iter < 10) {
+            for(int dx = -1; dx <= 1; dx++)
+            for(int dy = -1; dy <= 1; dy++)
+            for(int dz = -1; dz <= 1; dz++) {
+                int3 neighbor_cell_index = make_int3(
+                    query_cell_index.x + dx,
+                    query_cell_index.y + dy,
+                    query_cell_index.z + dz
+                );
+
+                uint32_t neighbor_cell_hash = hash_coord(neighbor_cell_index);
+                int found_index = find_hash_index(
+                    neighbor_cell_hash,
+                    unique_point_cell_hashes,
+                    num_unique_cells[0]
+                );
+
+                if (found_index == -1) {
                     continue;
                 }
 
-                for (int j = cell_start[c]; j < cell_end[c]; j++) {
-                    int pid = point_indices[j];
-                    if (pid == idx) {
+                // if (idx == 50) {
+                //     printf("Thread: 50, voxel_index: %d\n", found_index);
+                // }
+
+                int start = cell_start[found_index];
+                int end   = cell_end[found_index];
+                int count = end - start;
+
+                if (count <= 0) {
+                    continue;
+                }
+
+                // if (idx == 50) {
+                //     printf("Start: %d, End: %d\n", start, end);
+                // }
+
+                for(int i = start; i < end; i++){
+                    int pid = point_indices[i];
+                    if(pid == idx) {
                         continue;
                     }
 
-                    float distance  = dist2(p, points[pid]);
-                    int max_i       = 0;
-                    float max_d     = best_dist[0];
+                    float3 p = points[pid];
+                    float distance = cuda_vgicp::dist2(query_point, p);
 
-                    for (int k = 1; k < K_NEIGHBORS; k++) {
-                        if (best_dist[k] > max_d) {
+                    // if (idx == 50) {
+                    //     printf("Distance: %d\n", distance);
+                    // }
+
+                    int max_i = 0;
+                    float max_d = best_dist[0];
+                    for(int k = 1; k < K_NEIGHBORS; k++){
+                        if(best_dist[k] > max_d){
                             max_d = best_dist[k];
                             max_i = k;
                         }
@@ -165,16 +241,16 @@ void find_k_nearest_neighbors_kernel(
                     }
                 }
             }
-        }
 
-        // Check if all neighbor slots have been filled
-        done = true;
-        for(int k = 0; k < K_NEIGHBORS; k++) {
-            if(best_idx[k] < 0) {
-                done = false;
+            // Check if all neighbor slots have been filled
+            done = true;
+            for(int k = 0; k < K_NEIGHBORS; k++) {
+                if(best_idx[k] < 0) {
+                    done = false;
+                }
             }
+            iter++;
         }
-        iter++;
     }
 
     for(int k = 0; k < K_NEIGHBORS; k++) {
