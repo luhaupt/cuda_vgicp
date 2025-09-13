@@ -24,44 +24,38 @@ void cuda_vgicp::voxelgrid_downsample(
     float leaf_size,
     int* __restrict__ d_num_unique_cells
 ) {
-    // Set maximum block and thread properties
-    int threadsPerBlock, minBlocksCent;
-    cudaOccupancyMaxPotentialBlockSize(
-        &minBlocksCent,
-        &threadsPerBlock,
-        init_indices_and_compute_cell_hashes_kernel,
-        0,
-        0
-    );
-    int blocks = (N + threadsPerBlock - 1) / threadsPerBlock;
-
-
     // Used device pointer
     int* d_point_indices;
+    int* d_point_indices_sorted;
     uint32_t* d_point_cell_hashes;
+    uint32_t* d_point_cell_hashes_sorted;
     uint32_t* d_unique_point_cell_hashes;
     int* d_cell_start;
     int* d_cell_end;
     int* d_points_per_cell;
     int* d_neighbor_indices;
+    float* d_neighbor_distances;
     float* d_point_covariances;
     float* d_voxel_centroids;
     float* d_voxel_covariances;
 
     cudaMalloc(&d_point_indices, N * sizeof(int));
+    cudaMalloc(&d_point_indices_sorted, N * sizeof(int));
     cudaMalloc(&d_point_cell_hashes, N * sizeof(uint32_t));
-    cudaMemset(d_point_cell_hashes, 0, N * sizeof(uint32_t));
+    cudaMalloc(&d_point_cell_hashes_sorted, N * sizeof(uint32_t));
     cudaMalloc(&d_unique_point_cell_hashes, N * sizeof(uint32_t));
     cudaMalloc(&d_cell_start, N * sizeof(int));
     cudaMalloc(&d_cell_end, N * sizeof(int));
     cudaMalloc(&d_points_per_cell, N * sizeof(int));
     cudaMalloc(&d_neighbor_indices, N * K_NEIGHBORS * sizeof(int));
+    cudaMalloc(&d_neighbor_distances, N * K_NEIGHBORS * sizeof(float));
     cudaMalloc(&d_point_covariances, N * 6 * sizeof(float));
     cudaMalloc(&d_voxel_centroids, N * 3 * sizeof(float));
     cudaMalloc(&d_voxel_covariances, N * 6 * sizeof(float));
 
 
-    init_indices_and_compute_cell_hashes_kernel<<<blocks, threadsPerBlock>>>(
+    int blocks = (N + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    init_indices_and_compute_cell_hashes_kernel<<<blocks, THREADS_PER_BLOCK>>>(
         d_points,
         N,
         leaf_size,
@@ -69,28 +63,20 @@ void cuda_vgicp::voxelgrid_downsample(
         d_point_cell_hashes
     );
 
-    /// 0.74 msec/scan
-
     // Sort point indices by cell hash
     size_t temp_bytes = 0;
     void* d_temp = nullptr;
     cub::DeviceRadixSort::SortPairs(
-        d_temp,
-        temp_bytes,
-        d_point_cell_hashes,
-        d_point_cell_hashes,
-        d_point_indices,
-        d_point_indices,
+        d_temp, temp_bytes,
+        d_point_cell_hashes, d_point_cell_hashes_sorted,
+        d_point_indices, d_point_indices_sorted,
         N
     );
     cudaMalloc(&d_temp, temp_bytes);
     cub::DeviceRadixSort::SortPairs(
-        d_temp,
-        temp_bytes,
-        d_point_cell_hashes,
-        d_point_cell_hashes,
-        d_point_indices,
-        d_point_indices,
+        d_temp, temp_bytes,
+        d_point_cell_hashes, d_point_cell_hashes_sorted,
+        d_point_indices, d_point_indices_sorted,
         N
     );
     cudaFree(d_temp);
@@ -100,7 +86,7 @@ void cuda_vgicp::voxelgrid_downsample(
     void* rle_temp = nullptr;
     cub::DeviceRunLengthEncode::Encode(
         rle_temp, rle_temp_bytes,
-        d_point_cell_hashes,
+        d_point_cell_hashes_sorted,
         d_unique_point_cell_hashes,
         d_points_per_cell,
         d_num_unique_cells,
@@ -109,7 +95,7 @@ void cuda_vgicp::voxelgrid_downsample(
     cudaMalloc(&rle_temp, rle_temp_bytes);
     cub::DeviceRunLengthEncode::Encode(
         rle_temp, rle_temp_bytes,
-        d_point_cell_hashes,
+        d_point_cell_hashes_sorted,
         d_unique_point_cell_hashes,
         d_points_per_cell,
         d_num_unique_cells,
@@ -117,44 +103,68 @@ void cuda_vgicp::voxelgrid_downsample(
     );
     cudaFree(rle_temp);
 
-    /// 0.93 msec/scan
+    int h_num_unique_cells = 0;
+    cudaMemcpy(&h_num_unique_cells, d_num_unique_cells, sizeof(int), cudaMemcpyDeviceToHost);
 
-    compute_cell_ranges_kernel<<<blocks, threadsPerBlock>>>(
-        d_point_cell_hashes,
+    // Calculate cell start and end values
+    temp_bytes = 0;
+    void* d_temp_storage = nullptr;
+    cub::DeviceScan::ExclusiveSum(
+        d_temp_storage,
+        temp_bytes,
+        d_points_per_cell,
         d_cell_start,
+        h_num_unique_cells
+    );
+    cudaMalloc(&d_temp_storage, temp_bytes);
+    cub::DeviceScan::ExclusiveSum(
+        d_temp_storage,
+        temp_bytes,
+        d_points_per_cell,
+        d_cell_start,
+        h_num_unique_cells
+    );
+    cudaFree(d_temp_storage);
+
+    blocks = (h_num_unique_cells + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    compute_cell_ranges_kernel<<<blocks, THREADS_PER_BLOCK>>>(
+        d_cell_start,
+        d_points_per_cell,
         d_cell_end,
-        d_unique_point_cell_hashes,
-        N
+        d_num_unique_cells
     );
 
-    /// 0.93 msec/scan
-
-    find_k_nearest_neighbors_kernel<<<blocks, threadsPerBlock>>>(
+    int shared_mem_size = THREADS_PER_BLOCK * K_NEIGHBORS * (sizeof(float) + sizeof(int));
+    find_k_nearest_neighbors_kernel<<<blocks, THREADS_PER_BLOCK, shared_mem_size>>>(
         d_points,
         N,
-        d_point_indices,
-        d_unique_point_cell_hashes,
+        d_point_indices_sorted,
+        d_point_cell_hashes_sorted,
         d_cell_start,
         d_cell_end,
         d_num_unique_cells,
         d_points_per_cell,
         leaf_size,
-        d_neighbor_indices
+        d_neighbor_indices,
+        d_neighbor_distances
     );
 
-    /// 20 Nachbarn
-    /// 111.4 - 1.7     msec/scan --- BOTTLENECK
-    /// 104.2 - 1.65    msec/scan --- BOTTLENECK (ohne iterativer Ansatz)
-    /// 72.69 - 2.2     msec/scan --- knn - Fallback mit nur einer Zelle
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA Error after kernel launch: "
+                  << cudaGetErrorString(err) << std::endl;
+    }
 
-    compute_point_covariances_kernel<<<blocks, threadsPerBlock>>>(
+    blocks = (N + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    compute_point_covariances_kernel<<<blocks, THREADS_PER_BLOCK>>>(
         d_points,
         N,
         d_neighbor_indices,
         d_point_covariances
     );
 
-    compute_voxel_means_and_covariances_kernel<<<blocks, threadsPerBlock>>>(
+    blocks = (h_num_unique_cells + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    compute_voxel_means_and_covariances_kernel<<<blocks, THREADS_PER_BLOCK>>>(
         d_points,
         d_cell_start,
         d_cell_end,
@@ -165,12 +175,15 @@ void cuda_vgicp::voxelgrid_downsample(
     );
 
     cudaFree(d_point_indices);
+    cudaFree(d_point_indices_sorted);
     cudaFree(d_point_cell_hashes);
+    cudaFree(d_point_cell_hashes_sorted);
     cudaFree(d_unique_point_cell_hashes);
     cudaFree(d_cell_start);
     cudaFree(d_cell_end);
     cudaFree(d_points_per_cell);
     cudaFree(d_neighbor_indices);
+    cudaFree(d_neighbor_distances);
     cudaFree(d_point_covariances);
     cudaFree(d_voxel_centroids);
     cudaFree(d_voxel_covariances);
