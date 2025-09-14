@@ -22,38 +22,21 @@ void cuda_vgicp::voxelgrid_downsample(
     const float3* __restrict__ d_points,
     size_t N,
     float leaf_size,
-    int* __restrict__ d_num_unique_cells
+    int* __restrict__ d_num_unique_cells,
+    int* __restrict__ d_point_indices,
+    int* __restrict__ d_point_indices_sorted,
+    uint32_t* __restrict__ d_point_cell_hashes,
+    uint32_t* __restrict__ d_point_cell_hashes_sorted,
+    uint32_t* __restrict__ d_unique_point_cell_hashes,
+    int* __restrict__ d_cell_start,
+    int* __restrict__ d_cell_end,
+    int* __restrict__ d_points_per_cell,
+    int* __restrict__ d_neighbor_indices,
+    float* __restrict__ d_neighbor_distances,
+    float* __restrict__ d_point_covariances,
+    float* __restrict__ d_voxel_centroids,
+    float* __restrict__ d_voxel_covariances
 ) {
-    // Used device pointer
-    int* d_point_indices;
-    int* d_point_indices_sorted;
-    uint32_t* d_point_cell_hashes;
-    uint32_t* d_point_cell_hashes_sorted;
-    uint32_t* d_unique_point_cell_hashes;
-    int* d_cell_start;
-    int* d_cell_end;
-    int* d_points_per_cell;
-    int* d_neighbor_indices;
-    float* d_neighbor_distances;
-    float* d_point_covariances;
-    float* d_voxel_centroids;
-    float* d_voxel_covariances;
-
-    cudaMalloc(&d_point_indices, N * sizeof(int));
-    cudaMalloc(&d_point_indices_sorted, N * sizeof(int));
-    cudaMalloc(&d_point_cell_hashes, N * sizeof(uint32_t));
-    cudaMalloc(&d_point_cell_hashes_sorted, N * sizeof(uint32_t));
-    cudaMalloc(&d_unique_point_cell_hashes, N * sizeof(uint32_t));
-    cudaMalloc(&d_cell_start, N * sizeof(int));
-    cudaMalloc(&d_cell_end, N * sizeof(int));
-    cudaMalloc(&d_points_per_cell, N * sizeof(int));
-    cudaMalloc(&d_neighbor_indices, N * K_NEIGHBORS * sizeof(int));
-    cudaMalloc(&d_neighbor_distances, N * K_NEIGHBORS * sizeof(float));
-    cudaMalloc(&d_point_covariances, N * 6 * sizeof(float));
-    cudaMalloc(&d_voxel_centroids, N * 3 * sizeof(float));
-    cudaMalloc(&d_voxel_covariances, N * 6 * sizeof(float));
-
-
     int blocks = (N + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     init_indices_and_compute_cell_hashes_kernel<<<blocks, THREADS_PER_BLOCK>>>(
         d_points,
@@ -173,18 +156,4 @@ void cuda_vgicp::voxelgrid_downsample(
         d_voxel_centroids,
         d_voxel_covariances
     );
-
-    cudaFree(d_point_indices);
-    cudaFree(d_point_indices_sorted);
-    cudaFree(d_point_cell_hashes);
-    cudaFree(d_point_cell_hashes_sorted);
-    cudaFree(d_unique_point_cell_hashes);
-    cudaFree(d_cell_start);
-    cudaFree(d_cell_end);
-    cudaFree(d_points_per_cell);
-    cudaFree(d_neighbor_indices);
-    cudaFree(d_neighbor_distances);
-    cudaFree(d_point_covariances);
-    cudaFree(d_voxel_centroids);
-    cudaFree(d_voxel_covariances);
 }
